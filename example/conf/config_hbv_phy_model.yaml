@@ -1,0 +1,133 @@
+# LSTM + differentiable HBV process model (plain PyTorch autograd by default).
+
+defaults:
+  - _self_
+  - hydra: settings
+  - observations: camels_531  # camels_531, camels_671
+
+name: ${model.nn.name}-${model.phy.name}
+
+
+## General -------------------------------#
+mode: train  # train, test, train_test, sim
+
+seed: 111111
+cache_states: False
+device: cuda
+gpu_id: 0
+
+data_loader: HydroLoader
+data_sampler: HydroSampler
+trainer: Trainer
+
+output_dir: ./output/hbv_phy_model/
+model_dir: ${output_dir}model/
+
+
+## Training ------------------------------#
+train:
+  start_time: 1999/10/01
+  end_time: 2008/09/30
+  target: [streamflow]
+  optimizer:
+    name: Adam
+  lr: 1.0e-3
+  lr_scheduler:
+    name: none
+    step_size: 10
+    gamma: 0.5
+  loss_function:
+    name: RmseCombLoss
+
+  batch_size: 2
+  epochs: 50
+  start_epoch: 0
+  save_epoch: 5
+
+
+## Evaluation -------------------------------#
+test:
+  start_time: 1989/10/01
+  end_time: 1999/09/30
+  batch_size: 25
+  test_epoch: 10
+
+
+## Inference -------------------------------#
+sim:
+  start_time: 1989/10/01
+  end_time: 1999/09/30
+  batch_size: 25
+
+
+## Differentiable Model -----------------------------#
+model:
+  rho: 365
+  warmup: 365
+  output_unit: mm/d  # options: mm/d, m3/s, ft3/s
+
+  phy:
+    name: [HbvPhyModel]
+    autograd_scheme: null               # null -> plain autograd, else a autograd_scheme class name
+    solver:                             # torchdiffeq.odeint keyword arguments
+      method: euler                     # euler, midpoint, rk4, dopri5, etc.
+      rtol: 1.0e-4                      
+      atol: 1.0e-6
+      options: {step_size: 0.125}
+    nmul: 16
+    dynamic_params:
+      HbvPhyModel: [beta, gamma]
+    forcings: [
+      prcp,
+      tmean,
+      pet,
+    ]
+    attributes: []
+
+  nn:
+    name: CudnnLstmModel  # LstmModel for CPU
+    dropout: 0.5
+    hidden_size: 256
+
+    forcings: [
+      prcp,
+      tmean,
+      pet,
+    ]
+    attributes: [
+      p_mean,
+      pet_mean,
+      p_seasonality,
+      frac_snow,
+      aridity,
+      high_prec_freq,
+      high_prec_dur,
+      low_prec_freq,
+      low_prec_dur,
+      elev_mean,
+      slope_mean,
+      area_gages2,
+      frac_forest,
+      lai_max,
+      lai_diff,
+      gvf_max,
+      gvf_diff,
+      dom_land_cover_frac,
+      dom_land_cover,
+      root_depth_50,
+      soil_depth_pelletier,
+      soil_depth_statsgo,
+      soil_porosity,
+      soil_conductivity,
+      max_water_content,
+      sand_frac,
+      silt_frac,
+      clay_frac,
+      geol_1st_class,
+      glim_1st_class_frac,
+      geol_2nd_class,
+      glim_2nd_class_frac,
+      carbonate_rocks_frac,
+      geol_porosity,
+      geol_permeability,
+    ]

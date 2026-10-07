@@ -70,6 +70,7 @@ model:
 
   phy:
     name: [NonePhyModel]
+    differentiation_method: DefaultAutodiffMethod
     nmul: 16
     dynamic_params:
       NonePhyModel: [z1, z2]

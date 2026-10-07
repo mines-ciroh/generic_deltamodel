@@ -25,6 +25,7 @@ trainer_dir = 'trainers'
 loss_func_dir = 'models/criterion'
 phy_model_dir = 'models/phy_models'
 nn_model_dir = 'models/neural_networks'
+autograd_schemes_dir = 'models/phy_models/autograd_schemes'
 # ------------------------------------------#
 
 
@@ -70,6 +71,9 @@ def load_component(
 
     parent_dir = get_dir(directory)
     source = os.path.join(parent_dir, f"{name_lower}.py")
+    if class_name.endswith('Model') and not os.path.isfile(source):
+        # New process models may use their full class name as the filename.
+        source = os.path.join(parent_dir, f"{camel_to_snake(class_name)}.py")
 
     try:
         # Dynamically load the module
@@ -115,6 +119,16 @@ def import_phy_model(model: str, ver_name: str = None) -> type:
             torch.nn.Module,
         )
 
+def import_autograd_scheme(name: str) -> type:
+    """Loads a custom autograd scheme locally."""
+    from dmg.models.phy_models.autograd_schemes.base_autograd_scheme import (
+        BaseAutogradScheme,
+    )
+    return load_component(name, autograd_schemes_dir, BaseAutogradScheme)
+
+def import_autograd_schemes(name: str) -> type:
+    """Backward-compatible alias for the singular autograd loader."""
+    return import_autograd_scheme(name)
 
 def import_data_loader(name: str) -> type:
     """Loads a data loader dynamically."""
