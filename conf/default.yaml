@@ -70,8 +70,15 @@ model:
 
   phy:
     name: [NonePhyModel]
-    differentiation_method: DefaultAutodiffMethod
+    # For physical models supporting the new integration interface.
+    autograd_scheme: null  # null: standard PyTorch autograd, otherwise a custom scheme inside model/phy/autograd_schemes/
+    solver:  # torchdiffeq.odeint keyword arguments
+      method: euler
+      rtol: 1.0e-4
+      atol: 1.0e-6
+      options: {step_size: 0.25}
     nmul: 16
+    dy_drop: 0.0
     dynamic_params:
       NonePhyModel: [z1, z2]
 
