@@ -40,7 +40,7 @@ train:
     name: RmseCombLoss
 
   batch_size: 2
-  epochs: 50
+  epochs: 25
   start_epoch: 0
   save_epoch: 5
 
@@ -73,7 +73,7 @@ model:
       method: euler                     # euler, midpoint, rk4, dopri5, etc.
       rtol: 1.0e-4                      
       atol: 1.0e-6
-      options: {step_size: 0.125}
+      options: {step_size: 0.25}
     nmul: 16
     dynamic_params:
       HbvPhyModel: [beta, gamma]

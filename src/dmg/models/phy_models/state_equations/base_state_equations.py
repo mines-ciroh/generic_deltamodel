@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 import torch
 
@@ -30,18 +31,30 @@ class BaseStateEquations(ABC):
         """Build the initial state tensor, shaped ``[n_states, *batch_dims]``, from forcings x."""
 
     @abstractmethod
-    def f(
+    def build_rhs(
         self,
-        t: torch.Tensor,
-        state: torch.Tensor,
-        *,
-        forcing: torch.Tensor,
         theta: dict[str, torch.Tensor],
-    ) -> torch.Tensor:
-        """Return f=dS/dt (potentially a vector of state derivatives).
+        forcing: torch.Tensor,
+        *,
+        t_start: torch.Tensor,
+        dt: float,
+    ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+        """Returns the function defining the  r.h.s. of the differential equation.
 
-        Note: The position of `t` and `state` in the function arguments
-        match torchdiffeq's API for odeint().
+        The NN predicts a new set of parameters for every batch, which changes
+        the differential equation. This builder allows us to account for per-batch
+        parameters, as well as the meteorological forcings for the batch.
+
+        For torchdiffeq compatibility, the callable built by this method should only contain
+        time and state as input parameters in the following order:
+
+        def rhs(t, state):
+            ...
+
+        Arguments:
+        ---
+        theta: the set of parameters for the current batch
+        forcing: the meteorological forcing data input(s) that needs to be used in the model.
         """
 
     @abstractmethod

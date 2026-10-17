@@ -1,5 +1,3 @@
-from functools import partial
-
 import torch
 from torchdiffeq import odeint
 
@@ -22,18 +20,15 @@ def integrate_states(
         initial_state = state_equations.initialize_state(forcing)
     state = initial_state
     t = t.to(device=state.device, dtype=state.dtype)
-    validate_integration_inputs(forcing, t, theta, solver, dt)
 
+    # Check for errors before passing inputs to the solver
+    validate_integration_inputs(forcing, t, theta, solver, dt)
+    rhs = state_equations.build_rhs(theta, forcing, t_start=t[0], dt=dt)
     states = []
-    for i, t_i in enumerate(t):
-        # Set the ODE for torchdiffeq ingestion
-        f = partial(
-            state_equations.f,
-            forcing=forcing[i],
-            theta={name: value[i] for name, value in theta.items()},
-        )
+
+    for t_i in t:
         # step through f with the solver of choice and return the states.
-        state = odeint(f, state, torch.stack((t_i, t_i + dt)), **solver)[-1]
+        state = odeint(rhs, state, torch.stack((t_i, t_i + dt)), **solver)[-1]
         states.append(state)
 
     return torch.stack(states, dim=0)

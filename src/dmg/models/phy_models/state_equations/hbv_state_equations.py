@@ -41,36 +41,78 @@ class HbvStateEquations(BaseStateEquations):
         n_states = self.n_stores + 1
         return torch.zeros(n_states, *x.shape[1:-1], dtype=x.dtype, device=x.device)
 
-    def f(
+    def build_rhs(
         self,
-        t: torch.Tensor,
-        state: torch.Tensor,
-        *,
-        forcing: torch.Tensor,
         theta: dict[str, torch.Tensor],
-    ) -> torch.Tensor:
-        """Stack the ODEs into dS/dt for [snow, meltwater, soil, upper_zone, lower_zone, Q]."""
-        fluxes = self._fluxes(state=state, forcing=forcing, theta=theta)
+        forcing: torch.Tensor,
+        *,
+        t_start: torch.Tensor,
+        dt: float,
+    ):
+        """Build the rhs of the ode with the current forcings and parameters."""
+        if dt <= 0:
+            raise ValueError('dt must be positive.')
+        if forcing.shape[0] == 0:
+            raise ValueError('Forcing must contain at least one timestep.')
 
-        d_snow_dt = fluxes['snowfall'] + fluxes['refreeze'] - fluxes['melt']
-        d_meltwater_dt = fluxes['melt'] - fluxes['refreeze'] - fluxes['to_soil']
-        d_soil_dt = (
-            fluxes['to_soil'] + fluxes['rainfall'] - fluxes['recharge'] - fluxes['excess'] - fluxes['et']
-        )
-        d_upper_zone_dt = (
-            fluxes['recharge'] + fluxes['excess'] - fluxes['perc'] - fluxes['q0'] - fluxes['q1']
-        )
-        d_lower_zone_dt = fluxes['perc'] - fluxes['q2']
-        d_streamflow_dt = fluxes['q0'] + fluxes['q1'] + fluxes['q2']
+        n_times = forcing.shape[0]
 
-        return torch.stack((
-            d_snow_dt,
-            d_meltwater_dt,
-            d_soil_dt,
-            d_upper_zone_dt,
-            d_lower_zone_dt,
-            d_streamflow_dt,
-        ))
+        def rhs(
+            t: torch.Tensor,  # the timesteps to evaluate the ODE on
+            state: torch.Tensor,
+        ) -> torch.Tensor:
+            """Stack the ODEs into dS/dt for [snow, meltwater, soil, upper_zone, lower_zone, Q].
+
+            The function signature needs to be compatible with torchdiffeq.odeint()
+            """
+            # TODO: manually interpolate the forcings & params via linear interpolation.
+            u = ((t - t_start) / dt).clamp(0, n_times - 1)
+            i = u.floor().long()
+            j = (i + 1).clamp(max=n_times - 1)
+            weight = u - i
+
+            # linear interpolate the forcings for the current times
+            forcing_t = torch.lerp(forcing[i], forcing[j], weight)
+
+            # linear interpolate the parameters for the current times
+            theta_t = {
+                name: torch.lerp(values[i], values[j], weight)
+                for name, values in theta.items()
+            }
+
+            fluxes = self._fluxes(state=state, forcing=forcing_t, theta=theta_t)
+
+            d_snow_dt = fluxes['snowfall'] + fluxes['refreeze'] - fluxes['melt']
+            d_meltwater_dt = fluxes['melt'] - fluxes['refreeze'] - fluxes['to_soil']
+            d_soil_dt = (
+                fluxes['to_soil']
+                + fluxes['rainfall']
+                - fluxes['recharge']
+                - fluxes['excess']
+                - fluxes['et']
+            )
+            d_upper_zone_dt = (
+                fluxes['recharge']
+                + fluxes['excess']
+                - fluxes['perc']
+                - fluxes['q0']
+                - fluxes['q1']
+            )
+            d_lower_zone_dt = fluxes['perc'] - fluxes['q2']
+            d_streamflow_dt = fluxes['q0'] + fluxes['q1'] + fluxes['q2']
+
+            return torch.stack(
+                (
+                    d_snow_dt,
+                    d_meltwater_dt,
+                    d_soil_dt,
+                    d_upper_zone_dt,
+                    d_lower_zone_dt,
+                    d_streamflow_dt,
+                )
+            )
+
+        return rhs
 
     def compute_streamflow(
         self,
@@ -125,17 +167,16 @@ class HbvStateEquations(BaseStateEquations):
 
         snowfall = P * (T < tt)
         rainfall = P * (T >= tt)
-        refreeze = torch.minimum(
-            (cfr * cfmax * (tt - T)).clamp(min=0.0), meltwater
-        )
+        refreeze = torch.minimum((cfr * cfmax * (tt - T)).clamp(min=0.0), meltwater)
         melt = torch.minimum((cfmax * (T - tt)).clamp(min=0.0), snowpack)
         to_soil = (meltwater - cwh * snowpack).clamp(min=0.0)
-
 
         soil_wetness = ((soil / fc).clamp(min=1e-8) ** beta).clamp(max=1.0)
         recharge = (rainfall + to_soil) * soil_wetness
         excess = (soil - fc).clamp(min=0.0)
-        evap_factor = ((soil / (lp * fc)).clamp(min=1e-8) ** theta['gamma']).clamp(max=1.0)
+        evap_factor = ((soil / (lp * fc)).clamp(min=1e-8) ** theta['gamma']).clamp(
+            max=1.0
+        )
         et = torch.minimum(soil, Ep * evap_factor)
 
         perc = torch.minimum(upper_zone, theta['perc'])

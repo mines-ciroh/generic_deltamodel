@@ -12,7 +12,7 @@ class HbvPhyModel(BasePhyModel):
     """
 
     state_equations = HbvStateEquations()
-    dt = 1.0  # Forcing interval length in days.
+    dt = 1.0  # Forcing interval length in days from CAMELS-US data.
 
     def __init__(self, config: dict, device: str = 'cpu'):
         super().__init__()
@@ -30,9 +30,11 @@ class HbvPhyModel(BasePhyModel):
             import_autograd_scheme(autograd_scheme) if autograd_scheme else None
         )
 
-        # Instantiate the torchdiffeq solver from the config, otherwise use the default (euler)
+        # Instantiate the torchdiffeq solver from the config, otherwise use the default
         solver = config.get('solver')
+        # default solver options
         self.solver = {'method': 'euler', 'rtol': 1e-4, 'atol': 1e-6}
+
         self.solver.update(solver or {})
         self.solver['options'] = dict(self.solver.get('options') or {})
         if self.solver['method'] == 'euler':
@@ -62,12 +64,14 @@ class HbvPhyModel(BasePhyModel):
         ):
             raise ValueError('Parameter shape must match input time, basins, and count.')
 
+        # TODO: Think about how to add this to the base class.
         theta, routing_theta = self._prepare_parameters(parameters)
 
         forcing = x.unsqueeze(2).expand(-1, -1, self.nmul, -1)
 
         # timesteps for the ODE solve
         t = torch.arange(n_timesteps, device=x.device, dtype=x.dtype) * self.dt
+        
 
         w = self.warmup
         initial_state = self.state_equations.initialize_state(forcing)
