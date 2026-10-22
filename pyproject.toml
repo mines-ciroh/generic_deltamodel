@@ -16,7 +16,7 @@ authors = [
 maintainers = [
     { name = "Leo Lonzarich", email = "lglonzaric@gmail.com" },
 ]
-requires-python = ">=3.9.0"
+requires-python = ">=3.12"
 dynamic = ["version"]
 keywords = [
     "differentiable-modeling",
@@ -39,6 +39,7 @@ dependencies = [
     "pykan",
     "scikit-learn",
     "scipy",
+    "softtorch",
     "torch",
     "torchdiffeq>=0.2.5",
     "tqdm",
