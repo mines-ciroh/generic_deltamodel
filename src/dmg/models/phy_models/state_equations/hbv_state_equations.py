@@ -1,3 +1,6 @@
+from typing import Literal
+
+import softtorch as st
 import torch
 from hydrodl2.core.calc import uh_conv, uh_gamma
 
@@ -8,9 +11,49 @@ class HbvStateEquations(BaseStateEquations):
     """State equations for the HBV hydrological model.
 
     Adapted from `HBV.forward` in hydrodl2's `hbv_adj.py` (Song et al., 2024).
+
+    Hard thresholds are relaxed with softtorch so that gradients do not vanish:
+
+    - Store-limited operations (state non-negativity, overflow fluxes, and
+      supply-limited `min`s) use straight-through operators (soft surrogates). The forward pass is
+      the exact HBV (mass balance holds, empty stores don't leak), and only the
+      backward pass is soft.
+    - Parameter thresholds (rain/snow split, melt/refreeze onset, soil-moisture
+      saturation) are fully soft in both passes.
+
+    Parameters
+    ----------
+    temperature_softness
+        Softness of temperature thresholds (deg C).
+    storage_softness
+        Softness of storage/flux thresholds (mm or mm/day).
+    ratio_softness
+        Softness of dimensionless saturation ratios.
+    mode
+        softtorch relaxation family.
     """
 
     n_stores = 5
+
+    def __init__(
+        self,
+        *,
+        temperature_softness: float = 0.25,
+        storage_softness: float = 0.1,
+        ratio_softness: float = 0.01,
+        mode: Literal['smooth', 'c0', 'c1', 'c2'] = 'smooth',
+    ) -> None:
+        for name, value in (
+            ('temperature_softness', temperature_softness),
+            ('storage_softness', storage_softness),
+            ('ratio_softness', ratio_softness),
+        ):
+            if value <= 0:
+                raise ValueError(f'{name} must be positive.')
+        self.temperature_softness = temperature_softness
+        self.storage_softness = storage_softness
+        self.ratio_softness = ratio_softness
+        self.mode = mode
 
     # Static routing parameters, kept separate from the per-timestep physical parameters.
     routing_parameter_bounds = {
@@ -65,18 +108,29 @@ class HbvStateEquations(BaseStateEquations):
 
             The function signature needs to be compatible with torchdiffeq.odeint()
             """
-            # TODO: manually interpolate the forcings & params via linear interpolation.
+            # Linearly interpolate parameters/forcings.
             u = ((t - t_start) / dt).clamp(0, n_times - 1)
             i = u.floor().long()
             j = (i + 1).clamp(max=n_times - 1)
             weight = u - i
 
+            i_index = i.reshape(1)
+            j_index = j.reshape(1)
+
             # linear interpolate the forcings for the current times
-            forcing_t = torch.lerp(forcing[i], forcing[j], weight)
+            forcing_t = torch.lerp(
+                forcing.index_select(0, i_index).squeeze(0),
+                forcing.index_select(0, j_index).squeeze(0),
+                weight,
+            )
 
             # linear interpolate the parameters for the current times
             theta_t = {
-                name: torch.lerp(values[i], values[j], weight)
+                name: torch.lerp(
+                    values.index_select(0, i_index).squeeze(0),
+                    values.index_select(0, j_index).squeeze(0),
+                    weight,
+                )
                 for name, values in theta.items()
             }
 
@@ -153,34 +207,49 @@ class HbvStateEquations(BaseStateEquations):
         theta: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         """Evaluate every HBV flux at the given state."""
-        snowpack, meltwater, soil, upper_zone, lower_zone = state[:5].unbind(dim=0)
-        snowpack = snowpack.clamp(min=0.0)
-        meltwater = meltwater.clamp(min=0.0)
-        soil = soil.clamp(min=0.0)
-        upper_zone = upper_zone.clamp(min=0.0)
-        lower_zone = lower_zone.clamp(min=0.0)
+        temp_s, store_s, ratio_s = (
+            self.temperature_softness,
+            self.storage_softness,
+            self.ratio_softness,
+        )
+
+        snowpack, meltwater, soil, upper_zone, lower_zone = (
+            self._relu_st(store, store_s) for store in state[:5].unbind(dim=0)
+        )
 
         P, T, Ep = forcing.unbind(dim=-1)
 
         beta, fc, lp = theta['beta'], theta['fc'], theta['lp']
         tt, cfmax, cfr, cwh = theta['tt'], theta['dd'], theta['rfz'], theta['cwh']
 
-        snowfall = P * (T < tt)
-        rainfall = P * (T >= tt)
-        refreeze = torch.minimum((cfr * cfmax * (tt - T)).clamp(min=0.0), meltwater)
-        melt = torch.minimum((cfmax * (T - tt)).clamp(min=0.0), snowpack)
-        to_soil = (meltwater - cwh * snowpack).clamp(min=0.0)
-
-        soil_wetness = ((soil / fc).clamp(min=1e-8) ** beta).clamp(max=1.0)
-        recharge = (rainfall + to_soil) * soil_wetness
-        excess = (soil - fc).clamp(min=0.0)
-        evap_factor = ((soil / (lp * fc)).clamp(min=1e-8) ** theta['gamma']).clamp(
-            max=1.0
+        snow_fraction = st.less(T, tt, softness=temp_s, mode=self.mode)
+        snowfall = P * snow_fraction
+        rainfall = P * (1.0 - snow_fraction)
+        refreeze = self._min_st(
+            cfr * cfmax * st.relu(tt - T, softness=temp_s, mode=self.mode),
+            meltwater,
+            store_s,
         )
-        et = torch.minimum(soil, Ep * evap_factor)
+        melt = self._min_st(
+            cfmax * st.relu(T - tt, softness=temp_s, mode=self.mode),
+            snowpack,
+            store_s,
+        )
+        to_soil = self._relu_st(meltwater - cwh * snowpack, store_s)
 
-        perc = torch.minimum(upper_zone, theta['perc'])
-        q0 = theta['k0'] * (upper_zone - theta['uzl']).clamp(min=0.0)
+        # The hard 1e-8 floor keeps `** beta` / `** gamma` gradients finite.
+        soil_ratio = st.clamp(soil / fc, 0.0, 1.0, softness=ratio_s, mode=self.mode)
+        soil_wetness = soil_ratio.clamp(min=1e-8) ** beta
+        recharge = (rainfall + to_soil) * soil_wetness
+        excess = self._relu_st(soil - fc, store_s)
+        evap_ratio = st.clamp(
+            soil / (lp * fc), 0.0, 1.0, softness=ratio_s, mode=self.mode
+        )
+        evap_factor = evap_ratio.clamp(min=1e-8) ** theta['gamma']
+        et = self._min_st(soil, Ep * evap_factor, store_s)
+
+        perc = self._min_st(upper_zone, theta['perc'], store_s)
+        q0 = theta['k0'] * self._relu_st(upper_zone - theta['uzl'], store_s)
         q1 = theta['k1'] * upper_zone
         q2 = theta['k2'] * lower_zone
 
@@ -198,3 +267,21 @@ class HbvStateEquations(BaseStateEquations):
             'q1': q1,
             'q2': q2,
         }
+
+    def _relu_st(self, x: torch.Tensor, softness: float) -> torch.Tensor:
+        """Exact relu forward, soft relu gradient."""
+        return st.relu_st(x, softness=softness, mode=self.mode)
+
+    def _min_st(
+        self, a: torch.Tensor, b: torch.Tensor, softness: float
+    ) -> torch.Tensor:
+        """Exact elementwise minimum forward, soft minimum gradient to both inputs."""
+        a, b = torch.broadcast_tensors(a, b)
+        return st.min_st(
+            torch.stack((a, b), dim=-1),
+            dim=-1,
+            softness=softness,
+            mode=self.mode,
+            standardize=False,
+            gated_grad=False,
+        ).values

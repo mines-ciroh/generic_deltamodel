@@ -23,15 +23,18 @@ def integrate_states(
 
     # Check for errors before passing inputs to the solver
     validate_integration_inputs(forcing, t, theta, solver, dt)
+    
     rhs = state_equations.build_rhs(theta, forcing, t_start=t[0], dt=dt)
-    states = []
 
-    for t_i in t:
-        # step through f with the solver of choice and return the states.
-        state = odeint(rhs, state, torch.stack((t_i, t_i + dt)), **solver)[-1]
-        states.append(state)
+    # Compiles the RHS for the repeated computations in odeint().
+    rhs = torch.compile(
+        rhs,
+        fullgraph=True,
+    )
 
-    return torch.stack(states, dim=0)
+    evaluation_times = torch.cat((t[:1], t+dt))
+
+    return odeint(rhs, state, evaluation_times, **solver)[1:]
 
 
 def validate_integration_inputs(
