@@ -83,15 +83,6 @@ class OptimizerNameEnum(str, Enum):
     adam = 'Adam'
 
 
-class LRSchedulerNameEnum(str, Enum):
-    """Enumeration for different PyTorch learning rate schedulers."""
-
-    none = 'none'
-    steplr = 'StepLR'
-    exponentiallr = 'ExponentialLR'
-    cosineannealinglr = 'CosineAnnealingLR'
-
-
 class TestNameEnum(str, Enum):
     """Enumeration for different test types."""
 
@@ -143,9 +134,7 @@ class LRSchedulerConfig(BaseModel):
 
             extra = 'allow'
 
-    name: Optional[LRSchedulerNameEnum] = None
-    step_size: Optional[int] = None
-    gamma: Optional[float] = None
+    name: str
 
 
 class LossFunctionConfig(BaseModel):

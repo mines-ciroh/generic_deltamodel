@@ -62,8 +62,7 @@ class Trainer(BaseTrainer):
     verbose
         Whether to print verbose output.
 
-    TODO: Incorporate support for validation loss and early stopping in
-    training loop. This will also enable using ReduceLROnPlateau scheduler.
+    ReduceLROnPlateau monitors mean finite training loss, not validation loss.
     """
 
     def __init__(
@@ -183,19 +182,14 @@ class Trainer(BaseTrainer):
         """
         params = self.config['train']['lr_scheduler'].copy()
         name = params.pop('name')
-        scheduler_dict = {
-            'StepLR': torch.optim.lr_scheduler.StepLR,
-            'ExponentialLR': torch.optim.lr_scheduler.ExponentialLR,
-            # 'ReduceLROnPlateau': torch.optim.lr_scheduler.ReduceLROnPlateau,
-            'CosineAnnealingLR': torch.optim.lr_scheduler.CosineAnnealingLR,
-        }
-
         # Fetch scheduler class
-        cls = scheduler_dict[name]
-        if cls is None:
+        cls = getattr(torch.optim.lr_scheduler, name, None)
+        if (
+            not isinstance(cls, type)
+            or not issubclass(cls, torch.optim.lr_scheduler.LRScheduler)
+        ):
             raise ValueError(
-                f"Scheduler '{name}' not recognized. "
-                f"Available options are: {list(scheduler_dict.keys())}",
+                f"Scheduler '{name}' is not a PyTorch learning rate scheduler.",
             )
 
         # Initialize
@@ -336,6 +330,7 @@ class Trainer(BaseTrainer):
 
         self.current_epoch = epoch
         self.total_loss = 0.0
+        n_valid_batches = 0
 
         if hasattr(self.model, 'loss_dict'):
             for key in self.model.loss_dict:
@@ -392,6 +387,7 @@ class Trainer(BaseTrainer):
                 self.optimizer.step()
                 self._consecutive_bad_batches = 0
                 self.total_loss += batch_loss
+                n_valid_batches += 1
             else:
                 self._consecutive_bad_batches = (
                     getattr(self, '_consecutive_bad_batches', 0) + 1
@@ -426,7 +422,13 @@ class Trainer(BaseTrainer):
                 tqdm.tqdm.write(f"Epoch {epoch}, batch {mb} | loss: {loss.item()}")
 
         if self.use_scheduler:
-            self.scheduler.step()
+            if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                if n_valid_batches:
+                    self.scheduler.step(self.total_loss / n_valid_batches)
+                else:
+                    log.warning("No finite training losses; skipping scheduler step.")
+            else:
+                self.scheduler.step()
 
         if self.verbose:
             log.info(f"\n ---- \n Epoch {epoch} total loss: {self.total_loss}")

@@ -23,13 +23,10 @@ from dmg.core.utils import (
     set_randomseed,
 )
 
-# ------------------------------------------#
 # Define model settings here.
 CONFIG_PATH = '../example/conf/config_hbv_phy_model.yaml'
-PERIOD = 'TEST'
+PERIOD = 'TRAIN'
 TEST_EPOCH = 25
-# ------------------------------------------#
-
 
 def train(config_path: str) -> None:
     """Train the HBV process model using the given configuration."""

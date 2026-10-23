@@ -185,16 +185,14 @@ class HbvStateEquations(BaseStateEquations):
         # Snow module
         # ---
         # Grab the fraction of precipitation as snow vs. rain with st.less()
-        snow_fraction = st.less(
-            T, tt, softness=self.temperature_softness, mode=self.mode
-        )
+        snow_fraction = st.less(T, tt)
         rain_fraction = 1 - snow_fraction
         snowfall = P * snow_fraction
         rainfall = P * rain_fraction
 
-        refreeze = st.min(torch.stack(cfr * cfmax * st.relu(tt - T), meltwater, dim=-1))
+        refreeze = st.min(torch.stack((cfr * cfmax * st.relu(tt - T), meltwater), dim=-1))
 
-        melt = st.min(torch.stack(cfmax * st.relu(T - tt), snowpack, dim=-1))
+        melt = st.min(torch.stack((cfmax * st.relu(T - tt), snowpack), dim=-1))
 
         to_soil = st.relu(
             meltwater - cwh * snowpack,
@@ -209,14 +207,14 @@ class HbvStateEquations(BaseStateEquations):
         )
         soil_wetness = st.clamp(soil_ratio**beta, 0.0, 1.0)
         recharge = (rainfall + to_soil) * soil_wetness
-        excess = st.relu(soil - fc, self.storage_softness)
+        excess = st.relu(soil - fc)
         evap_ratio = st.clamp(soil / (lp * fc), 0.0, 1.0)
         evap_factor = st.relu(evap_ratio) ** theta['gamma']
-        et = st.min(torch.stack(soil, Ep * evap_factor, dim=-1))
+        et = st.min(torch.stack((soil, Ep * evap_factor), dim=-1))
 
         # Percolation
         # ---
-        perc = st.min(torch.stack(upper_zone, theta['perc'], dim=-1))
+        perc = st.min(torch.stack((upper_zone, theta['perc']), dim=-1))
 
         # Compute the three fluxes
         # ---
