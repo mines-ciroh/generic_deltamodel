@@ -179,7 +179,7 @@ class HbvStateEquations(BaseStateEquations):
         streamflow: torch.Tensor,
         rout_a: torch.Tensor,
         rout_b: torch.Tensor,
-        len_uh: int = 15,
+        len_uh: int = 15, # This was pulled directly from hbv_adj.py.
     ) -> torch.Tensor:
         """Route streamflow [time, basins] with a gamma unit hydrograph.
 
@@ -187,8 +187,11 @@ class HbvStateEquations(BaseStateEquations):
         """
         # TODO: revisit this.
         n_steps = streamflow.shape[0]
+        
+        # the two routing parameters
         a = rout_a.unsqueeze(0).repeat(n_steps, 1).unsqueeze(-1)
         b = rout_b.unsqueeze(0).repeat(n_steps, 1).unsqueeze(-1)
+
         uh = uh_gamma(a, b, lenF=len_uh).permute(1, 2, 0)  # [basins, 1, len_uh]
         rf = streamflow.unsqueeze(-1).permute(1, 2, 0)  # [basins, 1, time]
         return uh_conv(rf, uh).permute(2, 0, 1).squeeze(-1)
@@ -209,11 +212,11 @@ class HbvStateEquations(BaseStateEquations):
 
         # Unpack storages and apply st.relu() to ensure no negative storages.
         # note: st = straight through, not softtorch.
-        snowpack = self._soft_relu_st(state[0], softness=self.storage_softness)
-        meltwater = self._soft_relu_st(state[1], softness=self.storage_softness)
-        soil = self._soft_relu_st(state[2], softness=self.storage_softness)
-        upper_zone = self._soft_relu_st(state[3], softness=self.storage_softness)
-        lower_zone = self._soft_relu_st(state[4], softness=self.storage_softness)
+        snowpack = self._soft_relu(state[0], softness=self.storage_softness)
+        meltwater = self._soft_relu(state[1], softness=self.storage_softness)
+        soil = self._soft_relu(state[2], softness=self.storage_softness)
+        upper_zone = self._soft_relu(state[3], softness=self.storage_softness)
+        lower_zone = self._soft_relu(state[4], softness=self.storage_softness)
 
         # Snow module
         # Grab the fraction of precipitation as snow vs. rain with st.less()
@@ -224,19 +227,19 @@ class HbvStateEquations(BaseStateEquations):
         snowfall = P * snow_fraction
         rainfall = P * rain_fraction
 
-        refreeze = self._soft_min_st(
-            cfr * cfmax * self._soft_relu_st(tt - T, softness=self.temperature_softness),
+        refreeze = self._soft_min(
+            cfr * cfmax * self._soft_relu(tt - T, softness=self.temperature_softness),
             meltwater,
             softness=self.storage_softness,
         )
 
-        melt = self._soft_min_st(
-            cfmax * self._soft_relu_st(T - tt, softness=self.temperature_softness),
+        melt = self._soft_min(
+            cfmax * self._soft_relu(T - tt, softness=self.temperature_softness),
             snowpack,
             softness=self.storage_softness,
         )
 
-        to_soil = self._soft_relu_st(
+        to_soil = self._soft_relu(
             meltwater - cwh * snowpack,
             softness=self.storage_softness,
         )
@@ -247,28 +250,28 @@ class HbvStateEquations(BaseStateEquations):
         )
         soil_wetness = soil_ratio.clamp(min=1e-8) ** beta
         recharge = (rainfall + to_soil) * soil_wetness
-        excess = self._soft_relu_st(soil - fc, self.storage_softness)
+        excess = self._soft_relu(soil - fc, self.storage_softness)
         evap_ratio = st.clamp(
             soil / (lp * fc), 0.0, 1.0, softness=self.ratio_softness, mode=self.mode
         )
         evap_factor = (
-            self._soft_relu_st(evap_ratio, softness=self.ratio_softness) ** theta['gamma']
+            self._soft_relu(evap_ratio, softness=self.ratio_softness) ** theta['gamma']
         )
-        et = self._soft_min_st(
+        et = self._soft_min(
             soil,
             Ep * evap_factor,
             self.storage_softness,
         )
 
         # Percolation
-        perc = self._soft_min_st(
+        perc = self._soft_min(
             upper_zone,
             theta['perc'],
             self.storage_softness,
         )
 
         # Compute the fluxes
-        q0 = theta['k0'] * self._soft_relu_st(
+        q0 = theta['k0'] * self._soft_relu(
             upper_zone - theta['uzl'], self.storage_softness
         )
         q1 = theta['k1'] * upper_zone
@@ -289,15 +292,15 @@ class HbvStateEquations(BaseStateEquations):
             'q2': q2,
         }
 
-    def _soft_relu_st(self, x: torch.Tensor, softness: float) -> torch.Tensor:
+    def _soft_relu(self, x: torch.Tensor, softness: float) -> torch.Tensor:
         """Hard relu forward, soft relu backwards."""
-        return st.relu_st(x, softness=softness, mode=self.mode)
+        return st.relu(x, softness=softness, mode=self.mode)
 
-    def _soft_min_st(
+    def _soft_min(
         self, a: torch.Tensor, b: torch.Tensor, softness: float
     ) -> torch.Tensor:
         """Hard minimum on forward, soft minimum backwards."""
-        return st.min_st(
+        return st.min(
             torch.stack((a, b), dim=-1),
             dim=-1,
             softness=softness,
