@@ -121,7 +121,8 @@ class HbvPhyModel(BasePhyModel):
         is_dynamic = torch.tensor(
             [name in dynamic_params for name in names], device=phy_params.device
         ).unsqueeze(-1)
-        # dy_drop randomly reverts dynamic params to static, per basin, parameter, and component.
+
+        # drop randomly reverts dynamic params to static, per basin, parameter, and component.
         drop = torch.zeros_like(phy_params[:1], dtype=torch.bool)
         if self.training and self.dy_drop > 0:
             drop = torch.bernoulli(

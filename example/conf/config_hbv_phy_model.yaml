@@ -34,8 +34,6 @@ train:
   lr: 1.0e-3
   lr_scheduler:
     name: none
-    step_size: 10
-    gamma: 0.5
   loss_function:
     name: RmseCombLoss
 

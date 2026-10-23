@@ -14,13 +14,6 @@ class HbvStateEquations(BaseStateEquations):
 
     Hard thresholds are relaxed with softtorch so that gradients do not vanish:
 
-    - Store-limited operations (state non-negativity, overflow fluxes, and
-      supply-limited `min`s) use straight-through operators (soft surrogates). The forward pass is
-      the exact HBV (mass balance holds, empty stores don't leak), and only the
-      backward pass is soft.
-    - Parameter thresholds (rain/snow split, melt/refreeze onset, soil-moisture
-      saturation) are fully soft in both passes.
-
     Parameters
     ----------
     temperature_softness
@@ -190,8 +183,9 @@ class HbvStateEquations(BaseStateEquations):
     ) -> torch.Tensor:
         """Route streamflow [time, basins] with a gamma unit hydrograph.
 
-        `rout_a` and `rout_b` are dynamic descaled routing parameters of shape [basins].
+        `rout_a` and `rout_b` are routing parameters of shape [basins].
         """
+        # TODO: revisit this.
         n_steps = streamflow.shape[0]
         a = rout_a.unsqueeze(0).repeat(n_steps, 1).unsqueeze(-1)
         b = rout_b.unsqueeze(0).repeat(n_steps, 1).unsqueeze(-1)
@@ -207,49 +201,76 @@ class HbvStateEquations(BaseStateEquations):
         theta: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         """Evaluate every HBV flux at the given state."""
-        temp_s, store_s, ratio_s = (
-            self.temperature_softness,
-            self.storage_softness,
-            self.ratio_softness,
-        )
+        P, T, Ep = forcing.unbind(dim=-1)  # Unpack forcings
 
-        snowpack, meltwater, soil, upper_zone, lower_zone = (
-            self._relu_st(store, store_s) for store in state[:5].unbind(dim=0)
-        )
-
-        P, T, Ep = forcing.unbind(dim=-1)
-
+        # Unpack parameters
         beta, fc, lp = theta['beta'], theta['fc'], theta['lp']
         tt, cfmax, cfr, cwh = theta['tt'], theta['dd'], theta['rfz'], theta['cwh']
 
-        snow_fraction = st.less(T, tt, softness=temp_s, mode=self.mode)
-        snowfall = P * snow_fraction
-        rainfall = P * (1.0 - snow_fraction)
-        refreeze = self._min_st(
-            cfr * cfmax * st.relu(tt - T, softness=temp_s, mode=self.mode),
-            meltwater,
-            store_s,
-        )
-        melt = self._min_st(
-            cfmax * st.relu(T - tt, softness=temp_s, mode=self.mode),
-            snowpack,
-            store_s,
-        )
-        to_soil = self._relu_st(meltwater - cwh * snowpack, store_s)
+        # Unpack storages and apply st.relu() to ensure no negative storages.
+        # note: st = straight through, not softtorch.
+        snowpack = self._soft_relu_st(state[0], softness=self.storage_softness)
+        meltwater = self._soft_relu_st(state[1], softness=self.storage_softness)
+        soil = self._soft_relu_st(state[2], softness=self.storage_softness)
+        upper_zone = self._soft_relu_st(state[3], softness=self.storage_softness)
+        lower_zone = self._soft_relu_st(state[4], softness=self.storage_softness)
 
-        # The hard 1e-8 floor keeps `** beta` / `** gamma` gradients finite.
-        soil_ratio = st.clamp(soil / fc, 0.0, 1.0, softness=ratio_s, mode=self.mode)
+        # Snow module
+        # Grab the fraction of precipitation as snow vs. rain with st.less()
+        snow_fraction = st.less(
+            T, tt, softness=self.temperature_softness, mode=self.mode
+        )
+        rain_fraction = 1 - snow_fraction
+        snowfall = P * snow_fraction
+        rainfall = P * rain_fraction
+
+        refreeze = self._soft_min_st(
+            cfr * cfmax * self._soft_relu_st(tt - T, softness=self.temperature_softness),
+            meltwater,
+            softness=self.storage_softness,
+        )
+
+        melt = self._soft_min_st(
+            cfmax * self._soft_relu_st(T - tt, softness=self.temperature_softness),
+            snowpack,
+            softness=self.storage_softness,
+        )
+
+        to_soil = self._soft_relu_st(
+            meltwater - cwh * snowpack,
+            softness=self.storage_softness,
+        )
+
+        # Soil moisture and evapotranspiration (ET) module
+        soil_ratio = st.clamp(
+            soil / fc, 0.0, 1.0, softness=self.ratio_softness, mode=self.mode
+        )
         soil_wetness = soil_ratio.clamp(min=1e-8) ** beta
         recharge = (rainfall + to_soil) * soil_wetness
-        excess = self._relu_st(soil - fc, store_s)
+        excess = self._soft_relu_st(soil - fc, self.storage_softness)
         evap_ratio = st.clamp(
-            soil / (lp * fc), 0.0, 1.0, softness=ratio_s, mode=self.mode
+            soil / (lp * fc), 0.0, 1.0, softness=self.ratio_softness, mode=self.mode
         )
-        evap_factor = evap_ratio.clamp(min=1e-8) ** theta['gamma']
-        et = self._min_st(soil, Ep * evap_factor, store_s)
+        evap_factor = (
+            self._soft_relu_st(evap_ratio, softness=self.ratio_softness) ** theta['gamma']
+        )
+        et = self._soft_min_st(
+            soil,
+            Ep * evap_factor,
+            self.storage_softness,
+        )
 
-        perc = self._min_st(upper_zone, theta['perc'], store_s)
-        q0 = theta['k0'] * self._relu_st(upper_zone - theta['uzl'], store_s)
+        # Percolation
+        perc = self._soft_min_st(
+            upper_zone,
+            theta['perc'],
+            self.storage_softness,
+        )
+
+        # Compute the fluxes
+        q0 = theta['k0'] * self._soft_relu_st(
+            upper_zone - theta['uzl'], self.storage_softness
+        )
         q1 = theta['k1'] * upper_zone
         q2 = theta['k2'] * lower_zone
 
@@ -268,20 +289,17 @@ class HbvStateEquations(BaseStateEquations):
             'q2': q2,
         }
 
-    def _relu_st(self, x: torch.Tensor, softness: float) -> torch.Tensor:
-        """Exact relu forward, soft relu gradient."""
+    def _soft_relu_st(self, x: torch.Tensor, softness: float) -> torch.Tensor:
+        """Hard relu forward, soft relu backwards."""
         return st.relu_st(x, softness=softness, mode=self.mode)
 
-    def _min_st(
+    def _soft_min_st(
         self, a: torch.Tensor, b: torch.Tensor, softness: float
     ) -> torch.Tensor:
-        """Exact elementwise minimum forward, soft minimum gradient to both inputs."""
-        a, b = torch.broadcast_tensors(a, b)
+        """Hard minimum on forward, soft minimum backwards."""
         return st.min_st(
             torch.stack((a, b), dim=-1),
             dim=-1,
             softness=softness,
             mode=self.mode,
-            standardize=False,
-            gated_grad=False,
         ).values

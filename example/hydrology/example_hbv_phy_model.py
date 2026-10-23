@@ -26,7 +26,7 @@ from dmg.core.utils import (
 # ------------------------------------------#
 # Define model settings here.
 CONFIG_PATH = '../example/conf/config_hbv_phy_model.yaml'
-PERIOD = 'TEST'
+PERIOD = 'TRAIN'
 TEST_EPOCH = 25
 # ------------------------------------------#
 
