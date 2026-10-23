@@ -31,7 +31,7 @@ train:
   target: [streamflow]
   optimizer:
     name: Adam
-  lr: 1.0e-4
+  lr: 1.0e-3
   lr_scheduler:
     name: none
   loss_function:
